@@ -55,6 +55,9 @@ async function seedRubricVersion(def: RubricDef): Promise<void> {
     }
   }
 
+  // ~150 sequential inserts: fine locally, but against a remote database each one is a network round
+  // trip, which blows past Prisma's default 5 s interactive-transaction timeout. Still one atomic
+  // transaction — a failure leaves no half-seeded rubric behind.
   await prisma.$transaction(async (tx) => {
     const rubricVersion = existing
       ? await tx.rubricVersion.update({
@@ -192,7 +195,7 @@ async function seedRubricVersion(def: RubricDef): Promise<void> {
       where: { id: rubricVersion.id },
       data: { isPublished: true, publishedAt: new Date() },
     });
-  });
+  }, { maxWait: 30_000, timeout: 180_000 });
 
   console.log(`Seeded and published rubric version ${def.version}.`);
 }
