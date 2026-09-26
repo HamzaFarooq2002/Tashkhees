@@ -1,0 +1,338 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth (better-auth managed tables)
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String   @id
+  name          String
+  email         String
+  emailVerified Boolean
+  image         String?
+  createdAt     DateTime
+  updatedAt     DateTime
+
+  sessions    Session[]
+  accounts    Account[]
+  memberships Membership[]
+  evaluations Evaluation[] @relation("EvaluationCreator")
+
+  @@unique([email])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String
+  createdAt DateTime
+  updatedAt DateTime
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime
+  updatedAt             DateTime
+
+  @@map("account")
+}
+
+model Verification {
+  id         String    @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime?
+  updatedAt  DateTime?
+
+  @@map("verification")
+}
+
+// ---------------------------------------------------------------------------
+// Organization / membership
+// ---------------------------------------------------------------------------
+
+enum MembershipRole {
+  OWNER
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships Membership[]
+  evaluations Evaluation[]
+}
+
+model Membership {
+  id             String         @id @default(cuid())
+  userId         String
+  organizationId String
+  role           MembershipRole @default(OWNER)
+  createdAt      DateTime       @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+// ---------------------------------------------------------------------------
+// Rubric configuration (versioned, immutable once published)
+// ---------------------------------------------------------------------------
+
+enum ParameterInputType {
+  STANDARD
+  SUBPARAM
+  BANDED
+  SPLIT_BANDED
+  BOOLEAN
+}
+
+enum BandResolutionState {
+  RESOLVED
+  UNRESOLVED
+}
+
+model RubricVersion {
+  id          String    @id @default(cuid())
+  version     Int       @unique
+  label       String
+  isPublished Boolean   @default(false)
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  /// Deterministic sha256 of the resolved config (see src/lib/rubric/configHash.ts). Used to detect
+  /// an already-published version's source file being edited in place, which must never happen.
+  configHash String @unique @default("")
+  /// The scoring engine version (src/lib/scoring/engine-version.ts) this rubric was seeded against.
+  engineVersion String @default("v0-unknown")
+  /// Structured list of {parameterKey, subMetricKey, description} for every deliberately-unresolved band.
+  unresolvedRules Json @default("[]")
+
+  categories     Category[]
+  statusOptions  StatusOption[]
+  evaluations    Evaluation[]
+}
+
+model StatusOption {
+  id              String   @id @default(cuid())
+  rubricVersionId String
+  key             String // fully_implemented | partially_implemented | fragmented_uneven | absent
+  label           String
+  score           Decimal  @db.Decimal(4, 2)
+  sortOrder       Int
+
+  rubricVersion RubricVersion @relation(fields: [rubricVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([rubricVersionId, key])
+}
+
+model Category {
+  id              String  @id @default(cuid())
+  rubricVersionId String
+  key             String // technical | operational | financial_inclusion
+  name            String
+  weight          Decimal @db.Decimal(6, 4)
+  sortOrder       Int
+
+  rubricVersion RubricVersion @relation(fields: [rubricVersionId], references: [id], onDelete: Cascade)
+  parameters    Parameter[]
+
+  @@unique([rubricVersionId, key])
+}
+
+model Parameter {
+  id         String             @id @default(cuid())
+  categoryId String
+  key        String
+  name       String
+  weight     Decimal            @db.Decimal(6, 4)
+  inputType  ParameterInputType
+  sortOrder  Int
+
+  // Only meaningful when inputType === BOOLEAN
+  booleanYesMultiplier Decimal? @db.Decimal(5, 4)
+  booleanNoMultiplier  Decimal? @db.Decimal(5, 4)
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  standardOptions StandardOption[]
+  subParameters   SubParameter[]
+  bands           Band[] // used directly when inputType === BANDED
+  subMetrics      SubMetric[] // used when inputType === SPLIT_BANDED
+
+  @@unique([categoryId, key])
+}
+
+model StandardOption {
+  id          String  @id @default(cuid())
+  parameterId String
+  key         String
+  label       String
+  multiplier  Decimal @db.Decimal(5, 4)
+  sortOrder   Int
+
+  parameter Parameter @relation(fields: [parameterId], references: [id], onDelete: Cascade)
+
+  @@unique([parameterId, key])
+}
+
+model SubParameter {
+  id                String  @id @default(cuid())
+  parameterId       String
+  key               String
+  label             String
+  contributorWeight Decimal @db.Decimal(5, 4)
+  sortOrder         Int
+
+  parameter Parameter @relation(fields: [parameterId], references: [id], onDelete: Cascade)
+
+  @@unique([parameterId, key])
+}
+
+model SubMetric {
+  id          String  @id @default(cuid())
+  parameterId String
+  key         String
+  label       String
+  splitWeight Decimal @db.Decimal(5, 4)
+  sortOrder   Int
+
+  parameter Parameter @relation(fields: [parameterId], references: [id], onDelete: Cascade)
+  bands     Band[]
+
+  @@unique([parameterId, key])
+}
+
+model Band {
+  id             String  @id @default(cuid())
+  parameterId    String?
+  subMetricId    String?
+  lowerBound     Decimal @db.Decimal(6, 3)
+  upperBound     Decimal @db.Decimal(6, 3)
+  upperInclusive Boolean @default(false)
+  /// Null only when resolutionState is UNRESOLVED — see the CHECK constraint added by hand in the migration SQL.
+  multiplier      Decimal?            @db.Decimal(5, 4)
+  sourceLabel     String?
+  resolutionState BandResolutionState @default(RESOLVED)
+  /// Required and non-empty when resolutionState is UNRESOLVED; explains why no multiplier is defined.
+  note String?
+  sortOrder Int
+
+  parameter Parameter? @relation(fields: [parameterId], references: [id], onDelete: Cascade)
+  subMetric SubMetric? @relation(fields: [subMetricId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Evaluations
+// ---------------------------------------------------------------------------
+
+enum EvaluationStatus {
+  DRAFT
+  SUBMITTED
+}
+
+model Evaluation {
+  id              String           @id @default(cuid())
+  organizationId  String
+  creatorId       String
+  countryCode     String
+  countryName     String
+  assessmentDate  DateTime
+  title           String?
+  analystNotes    String?
+  status          EvaluationStatus @default(DRAFT)
+  rubricVersionId String
+  revision        Int              @default(0)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  submittedAt     DateTime?
+
+  organization  Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  creator       User            @relation("EvaluationCreator", fields: [creatorId], references: [id])
+  rubricVersion RubricVersion   @relation(fields: [rubricVersionId], references: [id])
+  entries       EvaluationEntry[]
+  resultSnapshot ResultSnapshot?
+
+  @@index([organizationId])
+}
+
+model EvaluationEntry {
+  id           String   @id @default(cuid())
+  evaluationId String
+  parameterKey String
+  rowKey       String   @default("main")
+
+  standardKey           String?
+  availability          Json?
+  availabilityConfirmed Boolean  @default(false)
+  rawPercentage         Decimal? @db.Decimal(6, 3)
+  booleanCapability     Boolean?
+  statusKey             String?
+
+  evidenceUrl String?
+  sourceTitle String?
+  sourceDate  String?
+  notes       String?
+
+  updatedAt DateTime @updatedAt
+
+  evaluation Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+
+  @@unique([evaluationId, parameterKey, rowKey])
+}
+
+model ResultSnapshot {
+  id               String   @id @default(cuid())
+  /// 1:1 by design — see SCORING_DECISIONS.md "ResultSnapshot cardinality". A future
+  /// "reopen a finalized evaluation" feature MUST drop @unique here (making this 1:many),
+  /// add a way to pick the current/latest snapshot (e.g. an `isCurrent` flag or order by `createdAt`),
+  /// and migrate the unique index on evaluationId to a plain index.
+  evaluationId     String   @unique
+  rubricVersionId  String
+  totalScore       Decimal  @db.Decimal(8, 4)
+  categoryTotals   Json
+  parameterResults Json
+  rowResults       Json
+  createdAt        DateTime @default(now())
+
+  /// The Evaluation.revision this snapshot was computed from.
+  inputRevision Int    @default(0)
+  /// Copied from RubricVersion.configHash at computation time, for drift detection.
+  configHash    String @default("")
+  engineVersion String @default("v0-unknown")
+  /// Serialized RowIssue[] — empty array for a fully complete submission.
+  issues        Json   @default("[]")
+
+  evaluation Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+}
